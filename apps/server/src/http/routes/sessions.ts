@@ -563,6 +563,7 @@ export function registerSessionRoutes(
 
     let session: AgentChatSession;
     let body: SendMessageRequest;
+    let clientOrigin: string | undefined;
     try {
       const resolvedSession = await agent.resolveSession(sessionId, orgId);
       if (!resolvedSession) {
@@ -571,15 +572,14 @@ export function registerSessionRoutes(
       }
       session = resolvedSession;
       body = await readJson<SendMessageRequest>(c.req.raw);
+      // Inside the try: a refused origin throws, and a turn left registered
+      // would wedge the session behind a 409 until the process restarts.
+      clientOrigin = resolveRequestClientOrigin(c.req.raw, body.clientOrigin);
     } catch (error) {
       sessionTurnRegistry.cancelTurn(sessionId);
       throw error;
     }
 
-    const clientOrigin = resolveRequestClientOrigin(
-      c.req.raw,
-      body.clientOrigin
-    );
     const input = {
       documents: body.documents,
       images: body.images,
