@@ -1,9 +1,11 @@
 import {
+  applyChatgptOAuthToInstance,
   createProviderInstanceId,
   defaultOllamaBaseUrl,
   defaultOllamaLabel,
   findCustomModel,
   findProviderInstance,
+  isChatgptProviderConnected,
   isOllamaCloudInstance,
   isValidBaseUrl,
   NakamaApiError,
@@ -11,6 +13,7 @@ import {
   normalizeProviderInstanceLabel,
   type OllamaHostMode,
   ollamaRequiresApiKey,
+  type ProviderClient,
   type ProviderInstance,
   parseWireApi,
   resolveOllamaHostMode,
@@ -26,6 +29,7 @@ import type {
   ProviderModelOption,
   UpdateProviderRequest,
 } from "@nakama/core/contract";
+import type { DatabaseAdapter } from "@nakama/db";
 import {
   getDefaultModel,
   getModelById,
@@ -40,15 +44,22 @@ import {
   validateOpenCodeGoCustomModels,
   validateOpenRouterCustomModels,
 } from "../providers";
+import {
+  type CreateProviderForInstanceOptions,
+  createProviderForInstance,
+} from "../providers/create";
 
 export function toProviderInstanceSummary(
   instance: ProviderInstance,
   modelCount: number
 ): ProviderInstanceSummary {
+  const chatgptConnected = isChatgptProviderConnected(instance);
+
   return {
     baseUrl: instance.baseUrl ?? null,
     hasApiKey:
       Boolean(instance.apiKey.trim()) ||
+      chatgptConnected ||
       instance.type === "openai_compatible" ||
       (instance.type === "ollama" && !isOllamaCloudInstance(instance)),
     hostMode:
@@ -175,8 +186,37 @@ export function buildProviderInstanceFromCreateRequest(
 
   const apiKey = request.apiKey?.trim() ?? "";
 
-  if (!apiKey && type !== "openai_compatible" && type !== "ollama") {
+  if (
+    !apiKey &&
+    type !== "openai_compatible" &&
+    type !== "ollama" &&
+    type !== "chatgpt"
+  ) {
     throw new NakamaApiError("API key is required.", 400);
+  }
+
+  if (type === "chatgpt") {
+    if (!request.chatgptOAuth) {
+      throw new NakamaApiError(
+        "Sign in with ChatGPT before saving this provider.",
+        400
+      );
+    }
+
+    const label = request.label?.trim()
+      ? validateProviderInstanceLabel(request.label, type)
+      : normalizeProviderInstanceLabel(type, "ChatGPT (Plus/Pro)", existing);
+
+    return applyChatgptOAuthToInstance(
+      {
+        apiKey: "",
+        createdAt: new Date().toISOString(),
+        id: createProviderInstanceId(),
+        label,
+        type,
+      },
+      request.chatgptOAuth
+    );
   }
 
   if (apiKey) {
@@ -229,6 +269,10 @@ export function applyProviderInstanceUpdate(
     next.apiKey = validateProviderApiKeyFormat(request.apiKey, instance.type);
   }
 
+  if (request.chatgptOAuth && instance.type === "chatgpt") {
+    return applyChatgptOAuthToInstance(next, request.chatgptOAuth);
+  }
+
   if (request.baseUrl !== undefined) {
     const normalized = normalizeBaseUrl(request.baseUrl);
     if (!isValidBaseUrl(normalized)) {
@@ -265,6 +309,7 @@ export function applyProviderInstanceUpdate(
       next.customModels = validateOpenCodeGoCustomModels(request.customModels);
     } else if (
       instance.type === "openai" ||
+      instance.type === "chatgpt" ||
       instance.type === "anthropic" ||
       instance.type === "gemini" ||
       instance.type === "deepseek"
@@ -571,4 +616,38 @@ export function resolveProfileProviderSelection(options: {
     instance: fallbackInstance,
     model: resolveDefaultModelForInstance(fallbackInstance),
   };
+}
+
+export async function createProviderForProfile(
+  db: DatabaseAdapter,
+  profileId: string,
+  userConfig: UserConfig | null,
+  options?: CreateProviderForInstanceOptions
+): Promise<ProviderClient | null> {
+  if (!userConfig) {
+    return null;
+  }
+
+  const profile = await db.getProfile(profileId);
+
+  if (!profile) {
+    return null;
+  }
+
+  const selection = resolveProfileProviderSelection({
+    defaultProviderId: userConfig.defaultProviderId,
+    profileModel: profile.model,
+    providers: userConfig.providers,
+  });
+
+  if (!selection) {
+    return null;
+  }
+
+  return createProviderForInstance(
+    selection.instance,
+    selection.model,
+    process.env,
+    options
+  );
 }

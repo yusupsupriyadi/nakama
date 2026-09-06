@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  apiKeyEnvVarForProvider,
   defaultDiscoveryBaseUrl,
   isDiscoveryModelProvider,
   parseProviderName,
@@ -9,6 +10,7 @@ import {
 describe("parseProviderName", () => {
   test("accepts known providers", () => {
     expect(parseProviderName("openai")).toBe("openai");
+    expect(parseProviderName("chatgpt")).toBe("chatgpt");
     expect(parseProviderName("Anthropic")).toBe("anthropic");
     expect(parseProviderName(" GEMINI ")).toBe("gemini");
     expect(parseProviderName("openai_compatible")).toBe("openai_compatible");
@@ -26,6 +28,12 @@ describe("parseProviderName", () => {
   test("rejects unknown values", () => {
     expect(parseProviderName("azure")).toBeNull();
     expect(parseProviderName("")).toBeNull();
+  });
+});
+
+describe("apiKeyEnvVarForProvider", () => {
+  test("chatgpt uses OAuth, not an API key env var", () => {
+    expect(apiKeyEnvVarForProvider("chatgpt")).toBeNull();
   });
 });
 

@@ -25,16 +25,16 @@ import {
 import type { QueuedComposerMessage } from "@/components/chat/ChatMessageQueuePanel";
 import { useActiveChatProfile } from "@/context/use-active-chat-profile";
 import { useAppContext } from "@/context/use-app-context";
-import { useProfileQuery } from "@/hooks/use-app-queries";
+import {
+  buildThinkingSettingsPayload,
+  useProfileQuery,
+  useSaveThinkingSettings,
+  useThinkingSettings,
+} from "@/hooks/use-app-queries";
 import {
   useBranchSessionMutation,
   useUpdateSessionMutation,
 } from "@/hooks/use-resource-mutations";
-import {
-  buildThinkingSettingsPayload,
-  useSaveThinkingSettings,
-  useThinkingSettings,
-} from "@/hooks/use-thinking-settings";
 import type { FileUIPart } from "@/lib/ai-ui-types";
 import {
   buildChatBasePath,
@@ -91,8 +91,6 @@ import {
   buildAutoEnableThinkingPayload,
   DEFAULT_THINKING_EFFORT,
   shouldAutoEnableThinking,
-  shouldBlockThinkingEffortChange,
-  shouldShowThinkingBlocks,
   shouldShowThinkingEffort,
 } from "@/lib/thinking-settings";
 import {
@@ -282,7 +280,7 @@ export function useChatPage() {
   );
 
   const readOnlySession = isReadOnlySessionChannel(sessionChannel);
-  const showThinking = shouldShowThinkingBlocks(activeModelSupportsThinking);
+  const showThinking = shouldShowThinkingEffort(activeModelSupportsThinking);
   const thinkingEffortVisible = shouldShowThinkingEffort(
     activeModelSupportsThinking
   );
@@ -405,10 +403,7 @@ export function useChatPage() {
         return;
       }
 
-      if (
-        shouldBlockThinkingEffortChange(busy) ||
-        saveThinkingSettingsMutation.isPending
-      ) {
+      if (busy || saveThinkingSettingsMutation.isPending) {
         if (busy) {
           setError("Wait for the current response to finish.");
         }

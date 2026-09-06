@@ -88,10 +88,6 @@ export const queryKeys = {
     profile: (profileId: string) => ["soul", "profile", profileId] as const,
   },
   systemStatus: ["systemStatus"] as const,
-  tasks: {
-    all: ["tasks"] as const,
-    messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
-  },
   telegram: {
     settings: ["telegram", "settings"] as const,
   },
@@ -114,4 +110,14 @@ export const queryKeys = {
     settings: ["whatsapp", "settings"] as const,
   },
   workerLogs: ["workerLogs"] as const,
+  workflows: {
+    all: ["workflows"] as const,
+    database: {
+      all: ["workflows", "database"] as const,
+      table: (table: string | null) =>
+        ["workflows", "database", table ?? ""] as const,
+    },
+    detail: (workflowId: string) => ["workflows", workflowId] as const,
+    runs: (workflowId: string) => ["workflows", workflowId, "runs"] as const,
+  },
 } as const;

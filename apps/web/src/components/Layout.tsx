@@ -14,7 +14,7 @@ import { AgentWorkTabs } from "@/pages/automations/agent-work-tabs";
 /** Pages that draw their own header content into the actions slot. */
 const SELF_TITLED_PAGES = new Set(["profiles", "soul"]);
 /** Pages that own their scrolling instead of scrolling the main column. */
-const FULL_HEIGHT_PAGES = new Set(["automations", "chat", "files", "tasks"]);
+const FULL_HEIGHT_PAGES = new Set(["automations", "chat", "files"]);
 
 export function Layout() {
   const location = useLocation();
@@ -41,7 +41,10 @@ export function Layout() {
             <AppSidebar />
           </div>
 
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pr-[env(safe-area-inset-right)]">
+          <div
+            className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pr-[env(safe-area-inset-right)]"
+            data-app-shell-content=""
+          >
             <header
               className={cn(
                 "app-shell-header gap-2 bg-card px-3 sm:gap-4 sm:px-6",
