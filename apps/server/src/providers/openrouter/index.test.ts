@@ -50,6 +50,46 @@ function streamChunk(delta: Record<string, unknown>): string {
   })}\r\n\r\n`;
 }
 
+function toolSupportRejectionBody(): string {
+  return JSON.stringify({
+    error: {
+      code: 404,
+      message:
+        'No endpoints found that support tool use. Try disabling "bash". To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection',
+      metadata: {
+        failed_routing_step: "Filter by Tool Compatibility",
+        routing_funnel: [{ endpoint_count: 1, step: "Initial Endpoints" }],
+      },
+    },
+  });
+}
+
+function vllmToolChoiceRejectionBody(): string {
+  return JSON.stringify({
+    error: {
+      code: 400,
+      message: "Provider returned error",
+      metadata: {
+        provider_name: "NextBit",
+        raw: JSON.stringify({
+          error: {
+            code: 400,
+            message: JSON.stringify({
+              error: {
+                code: 400,
+                message:
+                  '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set',
+                type: "BadRequestError",
+              },
+            }),
+            type: "invalid_request_error",
+          },
+        }),
+      },
+    },
+  });
+}
+
 describe("createOpenRouterProvider", () => {
   test("calls OpenRouter chat completions via SDK", async () => {
     const fetchMock = mock(
@@ -311,5 +351,249 @@ describe("createOpenRouterProvider", () => {
         system: "You are helpful.",
       })
     ).rejects.toThrow("OpenRouter returned an empty response.");
+  });
+
+  test("retries without tools when OpenRouter finds no tool-capable endpoint", async () => {
+    const bodies: Array<{
+      messages?: Array<{ role: string; content: string }>;
+      tool_choice?: unknown;
+      tools?: unknown[];
+    }> = [];
+    const fetchMock = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        bodies.push(await request.json());
+
+        if (bodies.length === 1) {
+          return new Response(toolSupportRejectionBody(), {
+            headers: { "Content-Type": "application/json" },
+            status: 404,
+          });
+        }
+
+        return new Response(chatCompletionResponse("Answer without tools"), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+    );
+
+    const provider = createOpenRouterProvider({
+      apiKey: "sk-or-v1-test",
+      fetcher: fetchMock as typeof fetch,
+      model: "thedrummer/cydonia-24b-v4.1",
+    });
+
+    const result = await provider.generateChat({
+      messages: [{ content: "hi", role: "user" }],
+      system: "You are helpful.",
+      tools: [
+        {
+          description: "Run a shell command",
+          name: "bash",
+          parameters: { properties: {}, type: "object" },
+        },
+      ],
+    });
+
+    expect(result.content).toBe("Answer without tools");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.tools).toHaveLength(1);
+    expect(bodies[0]?.tool_choice).toBe("auto");
+    expect(bodies[1]?.tools).toBeUndefined();
+    expect(bodies[1]?.tool_choice).toBeUndefined();
+    expect(bodies[1]?.messages?.[0]?.content).toContain(
+      "no tool-calling support"
+    );
+  });
+
+  test("retries a stream without tools when tool use is unsupported", async () => {
+    const bodies: Array<{ tools?: unknown[] }> = [];
+    const fetchMock = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        bodies.push(await request.json());
+
+        if (bodies.length === 1) {
+          return new Response(toolSupportRejectionBody(), {
+            headers: { "Content-Type": "application/json" },
+            status: 404,
+          });
+        }
+
+        return new Response(
+          streamFromChunks([
+            streamChunk({ content: "Hi" }),
+            "data:[DONE]\r\n\r\n",
+          ]),
+          { headers: { "Content-Type": "text/event-stream" }, status: 200 }
+        );
+      }
+    );
+
+    const provider = createOpenRouterProvider({
+      apiKey: "sk-or-v1-test",
+      fetcher: fetchMock as typeof fetch,
+      model: "thedrummer/cydonia-24b-v4.1",
+    });
+
+    const chunks: string[] = [];
+    const result = await provider.streamChat(
+      {
+        messages: [{ content: "hi", role: "user" }],
+        system: "You are helpful.",
+        tools: [
+          {
+            description: "Run a shell command",
+            name: "bash",
+            parameters: { properties: {}, type: "object" },
+          },
+        ],
+      },
+      { onChunk: (delta) => chunks.push(delta) }
+    );
+
+    expect(result.content).toBe("Hi");
+    expect(chunks).toEqual(["Hi"]);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]?.tools).toBeUndefined();
+  });
+
+  test("does not retry when the failure is unrelated to tool support", async () => {
+    const fetchMock = mock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { code: 401, message: "No auth credentials found" },
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 401 }
+        )
+    );
+
+    const provider = createOpenRouterProvider({
+      apiKey: "sk-or-v1-test",
+      fetcher: fetchMock as typeof fetch,
+      model: "thedrummer/cydonia-24b-v4.1",
+    });
+
+    await expect(
+      provider.generateChat({
+        messages: [{ content: "hi", role: "user" }],
+        system: "You are helpful.",
+        tools: [
+          {
+            description: "Run a shell command",
+            name: "bash",
+            parameters: { properties: {}, type: "object" },
+          },
+        ],
+      })
+    ).rejects.toThrow("OpenRouter request failed (401)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries without tools when the endpoint cannot serve tool choice", async () => {
+    const bodies: Array<{
+      messages?: Array<{ role: string; content: string }>;
+      tool_choice?: unknown;
+      tools?: unknown[];
+    }> = [];
+    const fetchMock = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        bodies.push(await request.json());
+
+        if (bodies.length === 1) {
+          return new Response(vllmToolChoiceRejectionBody(), {
+            headers: { "Content-Type": "application/json" },
+            status: 400,
+          });
+        }
+
+        return new Response(chatCompletionResponse("Plain answer"), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+    );
+
+    const provider = createOpenRouterProvider({
+      apiKey: "sk-or-v1-test",
+      fetcher: fetchMock as typeof fetch,
+      model: "thedrummer/unslopnemo-12b",
+    });
+
+    const result = await provider.generateChat({
+      messages: [{ content: "hi", role: "user" }],
+      system: "You are helpful.",
+      tools: [
+        {
+          description: "Run a shell command",
+          name: "bash",
+          parameters: { properties: {}, type: "object" },
+        },
+      ],
+    });
+
+    expect(result.content).toBe("Plain answer");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.tools).toHaveLength(1);
+    expect(bodies[1]?.tools).toBeUndefined();
+    expect(bodies[1]?.tool_choice).toBeUndefined();
+    expect(bodies[1]?.messages?.[0]?.content).toContain(
+      "no tool-calling support"
+    );
+  });
+
+  test("keeps image parts in the wire format OpenRouter expects", async () => {
+    const bodies: Array<{ messages?: Array<{ content?: unknown }> }> = [];
+
+    const fetchMock = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        bodies.push((await request.json()) as (typeof bodies)[number]);
+
+        return new Response(chatCompletionResponse("A cat."), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+    );
+
+    const provider = createOpenRouterProvider({
+      apiKey: "sk-or-v1-test",
+      fetcher: fetchMock as typeof fetch,
+      model: "google/gemini-2.5-flash",
+    });
+
+    const result = await provider.generateChat({
+      messages: [
+        {
+          content: [
+            { text: "What is this?", type: "text" },
+            {
+              data: "AAAA",
+              mediaType: "image/png",
+              type: "image",
+            },
+          ],
+          role: "user",
+        },
+      ],
+      system: "You are helpful.",
+    });
+
+    expect(result.content).toBe("A cat.");
+    expect(bodies.at(-1)?.messages?.at(-1)?.content).toEqual([
+      { text: "What is this?", type: "text" },
+      {
+        image_url: { url: "data:image/png;base64,AAAA" },
+        type: "image_url",
+      },
+    ]);
   });
 });

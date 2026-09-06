@@ -14,6 +14,7 @@ import type {
 import type { Fetcher } from "@openrouter/sdk";
 import { HTTPClient, OpenRouter } from "@openrouter/sdk";
 import type {
+  ChatContentItems,
   ChatFunctionTool,
   ChatMessages,
   ChatRequest,
@@ -32,6 +33,10 @@ import {
   parseJsonRecord,
 } from "../shared";
 import { openRouterModelSupportsThinking } from "./thinking";
+import {
+  isOpenRouterToolSupportRejection,
+  OPENROUTER_TOOLS_UNAVAILABLE_GUIDANCE,
+} from "./tool-support";
 
 const OPENROUTER_REFERER = "https://github.com/ahmadrosid/nakama";
 const OPENROUTER_APP_TITLE = "Nakama";
@@ -107,6 +112,32 @@ function toSdkTools(
   }));
 }
 
+/**
+ * The SDK takes camelCase input and serializes it to the OpenAI wire format
+ * itself, so the snake_case parts `toOpenAIChatUserContent` builds have to be
+ * translated first or Zod rejects the whole request before it is sent.
+ */
+function toSdkUserContentPart(part: Record<string, unknown>): ChatContentItems {
+  if (part.type === "image_url") {
+    return {
+      imageUrl: part.image_url as { detail?: string; url: string },
+      type: "image_url",
+    } as ChatContentItems;
+  }
+
+  if (part.type === "input_file") {
+    return {
+      file: {
+        fileData: part.file_data as string | undefined,
+        filename: part.filename as string | undefined,
+      },
+      type: "file",
+    };
+  }
+
+  return part as ChatContentItems;
+}
+
 function openAIMessageToSdkMessage(message: OpenAIMessage): ChatMessages {
   if (message.role === "assistant") {
     return {
@@ -135,7 +166,14 @@ function openAIMessageToSdkMessage(message: OpenAIMessage): ChatMessages {
     };
   }
 
-  return message as ChatMessages;
+  if (typeof message.content === "string") {
+    return message as ChatMessages;
+  }
+
+  return {
+    content: message.content.map(toSdkUserContentPart),
+    role: "user",
+  };
 }
 
 async function toSdkMessages(
@@ -246,6 +284,33 @@ async function buildChatRequestBase(options: {
     ...(tools?.length ? { toolChoice: "auto" as const, tools } : {}),
     ...reasoningRequest,
   };
+}
+
+/**
+ * Sends the turn as built, and once more without the tool list when OpenRouter
+ * reports that no endpoint for the model can serve tool use. The retry cannot
+ * carry the tools, so it tells the model they are gone rather than leaving the
+ * prompt promising tools the request no longer has.
+ */
+async function sendWithToolSupportFallback<T>(options: {
+  buildRequest: (dropTools: boolean) => Promise<Omit<ChatRequest, "stream">>;
+  hasTools: boolean;
+  model: string;
+  send: (request: Omit<ChatRequest, "stream">) => Promise<T>;
+}): Promise<T> {
+  try {
+    return await options.send(await options.buildRequest(false));
+  } catch (error) {
+    if (!(options.hasTools && isOpenRouterToolSupportRejection(error))) {
+      throw error;
+    }
+
+    console.warn(
+      `OpenRouter model ${options.model} has no usable tool-calling endpoint; retrying this turn without tools.`
+    );
+
+    return await options.send(await options.buildRequest(true));
+  }
 }
 
 interface PendingToolCall {
@@ -370,18 +435,26 @@ export function createOpenRouterProvider(
   return {
     generateChat(input: GenerateChatInput) {
       return withOpenRouterError(async () => {
-        const chatRequest = await buildChatRequestBase({
-          customModels,
-          messages: input.messages,
+        const result = await sendWithToolSupportFallback({
+          buildRequest: (dropTools) =>
+            buildChatRequestBase({
+              customModels,
+              messages: input.messages,
+              model,
+              providerOptions: input.providerOptions,
+              system: dropTools
+                ? `${input.system}\n\n${OPENROUTER_TOOLS_UNAVAILABLE_GUIDANCE}`
+                : input.system,
+              ...(dropTools ? {} : { tools: input.tools }),
+            }),
+          hasTools: Boolean(input.tools?.length),
           model,
-          providerOptions: input.providerOptions,
-          system: input.system,
-          tools: input.tools,
+          send: (chatRequest) =>
+            client.chat.send(
+              { chatRequest: { ...chatRequest, stream: false as const } },
+              { fetchOptions: { signal: input.signal } }
+            ),
         });
-        const result = await client.chat.send(
-          { chatRequest: { ...chatRequest, stream: false as const } },
-          { fetchOptions: { signal: input.signal } }
-        );
 
         return parseChatResult(result);
       });
@@ -425,18 +498,26 @@ export function createOpenRouterProvider(
     name: "openrouter",
     streamChat(input: GenerateChatInput, handlers: StreamChatHandlers) {
       return withOpenRouterError(async () => {
-        const chatRequest = await buildChatRequestBase({
-          customModels,
-          messages: input.messages,
+        const stream = await sendWithToolSupportFallback({
+          buildRequest: (dropTools) =>
+            buildChatRequestBase({
+              customModels,
+              messages: input.messages,
+              model,
+              providerOptions: input.providerOptions,
+              system: dropTools
+                ? `${input.system}\n\n${OPENROUTER_TOOLS_UNAVAILABLE_GUIDANCE}`
+                : input.system,
+              ...(dropTools ? {} : { tools: input.tools }),
+            }),
+          hasTools: Boolean(input.tools?.length),
           model,
-          providerOptions: input.providerOptions,
-          system: input.system,
-          tools: input.tools,
+          send: (chatRequest) =>
+            client.chat.send(
+              { chatRequest: { ...chatRequest, stream: true as const } },
+              { fetchOptions: { signal: input.signal } }
+            ),
         });
-        const stream = await client.chat.send(
-          { chatRequest: { ...chatRequest, stream: true as const } },
-          { fetchOptions: { signal: input.signal } }
-        );
 
         return readOpenRouterStream(stream, handlers);
       });
