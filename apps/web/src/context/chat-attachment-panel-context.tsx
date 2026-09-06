@@ -14,6 +14,7 @@ import {
   type ChatAttachmentPanelConfig,
   ChatAttachmentPanelContext,
 } from "@/context/chat-attachment-panel-context-shared";
+import { usePhoneViewport } from "@/hooks/use-media-query";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_PANEL_WIDTH = 448;
@@ -29,6 +30,8 @@ export function ChatAttachmentPanelProvider({
 }) {
   const [config, setConfig] = useState<ChatAttachmentPanelConfig | null>(null);
   const [width, setWidth] = useState(DEFAULT_PANEL_WIDTH);
+  // A resizable side panel has no room on a phone, so it takes the screen.
+  const isPhone = usePhoneViewport();
   const [enterSlide, setEnterSlide] = useState(false);
   const configRef = useRef<ChatAttachmentPanelConfig | null>(config);
 
@@ -125,20 +128,21 @@ export function ChatAttachmentPanelProvider({
     setConfig(null);
   }, []);
 
+  const fullscreen = (config?.fullscreen ?? false) || isPhone;
+
   const value = useMemo(
     () => ({
       activeId: config?.id ?? null,
       hide,
-      isFullscreen: config?.fullscreen ?? false,
+      isFullscreen: config !== null && fullscreen,
       isOpen: config !== null,
       show,
       update,
     }),
-    [config, show, update, hide]
+    [config, fullscreen, show, update, hide]
   );
 
   const overlay = presentation === "overlay";
-  const fullscreen = config?.fullscreen ?? false;
 
   return (
     <ChatAttachmentPanelContext.Provider value={value}>
